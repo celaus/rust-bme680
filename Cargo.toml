@@ -1,5 +1,5 @@
 [package]
-name = "rust-bme680"
+name = "bme680"
 version = "0.1.0"
 authors = ["Claus Matzinger <claus.matzinger+kb@gmail.com>"]
 edition = "2018"

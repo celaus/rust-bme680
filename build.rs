@@ -1,10 +1,9 @@
-
 use std::env;
 use std::env::var;
 
 use std::path::PathBuf;
 
-const HEADER_FILE_NAME: &'static str = "../BME680_driver/bme680.h";
+const HEADER_FILE_NAME: &'static str = "BME680_driver/bme680.h";
 
 fn main() {
     let project_dir = var("CARGO_MANIFEST_DIR").unwrap();
