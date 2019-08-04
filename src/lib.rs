@@ -1,175 +1,190 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-use std::ffi::CString;
+mod errors;
+mod helpers;
+mod sensors;
+mod source;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+use errors::SensorError;
+use source::*;
 
-/** BME680 General config */
-pub const BME680_POLL_PERIOD_MS: u8 = 10;
+use i2cdev::core::*;
+use i2cdev::linux::LinuxI2CDevice;
+use std::cell::RefCell;
+use std::cmp;
+use std::collections::BTreeMap;
+use std::ptr;
+use std::thread::sleep;
+use std::time::Duration;
 
-/** BME680 I2C addresses */
-pub const BME680_I2C_ADDR_PRIMARY: u8 = 0x76;
-pub const BME680_I2C_ADDR_SECONDARY: u8 = 0x77;
+///
+/// Over-sampling settings
+///
+pub enum Oversampling {
+    None = 0,
+    _1X = 1,
+    _2X = 2,
+    _4X = 3,
+    _8X = 4,
+    _16X = 5,
+}
 
-/** BME680 unique chip identifier */
-pub const BME680_CHIP_ID: u8 = 0x61;
+///
+///  IIR filter settings
+///
+pub enum FilterSize {
+    Size_0 = 0,
+    Size_1 = 1,
+    Size_3 = 2,
+    Size_7 = 3,
+    Size_15 = 4,
+    Size_31 = 5,
+    Size_63 = 6,
+    Size_127 = 7,
+}
 
-/** BME680 coefficients related defines */
-pub const BME680_COEFF_SIZE: u8 = 41;
-pub const BME680_COEFF_ADDR1_LEN: u8 = 25;
-pub const BME680_COEFF_ADDR2_LEN: u8 = 16;
+#[derive(Copy, Clone)]
+pub enum Bme680Address {
+    Primary = BME680_I2C_ADDR_PRIMARY as isize,
+    Secondary = BME680_I2C_ADDR_SECONDARY as isize,
+}
 
-/** BME680 field_x related defines */
-pub const BME680_FIELD_LENGTH: u8 = 15;
-pub const BME680_FIELD_ADDR_OFFSET: u8 = 17;
+impl Default for Bme680Address {
+    fn default() -> Self {
+        Bme680Address::Primary
+    }
+}
 
-/** Soft reset command */
-pub const BME680_SOFT_RESET_CMD: u8 = 0xb6;
+thread_local!(static DEVICES: RefCell<BTreeMap<u8, LinuxI2CDevice>> = RefCell::new(BTreeMap::new()));
 
-/** Error code definitions */
-pub const BME680_OK: i8 = 0;
-/* Errors */
-pub const BME680_E_NULL_PTR: i8 = -1;
-pub const BME680_E_COM_FAIL: i8 = -2;
-pub const BME680_E_DEV_NOT_FOUND: i8 = -3;
-pub const BME680_E_INVALID_LENGTH: i8 = -4;
+unsafe extern "C" fn write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
+    DEVICES.with(|devices| {
+        devices.borrow_mut().get_mut(&dev_id).map_or(1, |mut dev| {
+            let d = std::slice::from_raw_parts(data, len as usize);
+            dev.smbus_write_i2c_block_data(reg_addr, &d)
+                .map(|_| 0)
+                .map_err(|e| {
+                    println!("error: {:?}", e);
+                    e
+                })
+                .unwrap_or(1)
+        })
+    })
+}
 
-/* Warnings */
-pub const BME680_W_DEFINE_PWR_MODE: i8 = 1;
-pub const BME680_W_NO_NEW_DATA: i8 = 2;
+unsafe extern "C" fn read(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
+    DEVICES.with(|devices| {
+        devices.borrow_mut().get_mut(&dev_id).map_or(1, |mut dev| {
+            dev.smbus_read_i2c_block_data(reg_addr, len as u8)
+                .map(|d| {
+                    //let mut out_data = std::slice::from_raw_parts_mut(data,d.len());
+                    ptr::copy_nonoverlapping(d.as_ptr(), data, cmp::min(len as usize, d.len()));
+                    //out_data = &d.clone();
+                    0
+                })
+                .unwrap_or(1)
+        })
+    })
+}
 
-/* Info's */
-pub const BME680_I_MIN_CORRECTION: u8 = 1;
-pub const BME680_I_MAX_CORRECTION: u8 = 2;
+unsafe extern "C" fn delay(ms: u32) {
+    sleep(Duration::from_millis(ms as u64));
+}
 
-/** Register map */
-/** Other coefficient's address */
-pub const BME680_ADDR_RES_HEAT_VAL_ADDR: u8 = 0x00;
-pub const BME680_ADDR_RES_HEAT_RANGE_ADDR: u8 = 0x02;
-pub const BME680_ADDR_RANGE_SW_ERR_ADDR: u8 = 0x04;
-pub const BME680_ADDR_SENS_CONF_START: u8 = 0x5A;
-pub const BME680_ADDR_GAS_CONF_START: u8 = 0x64;
+pub struct Bme680Data {
+    pub temperature: f32,
+    pub pressure: u32,
+    pub humidity: f32,
+    pub gas_resistance: u32,
+}
 
-/** Field settings */
-pub const BME680_FIELD0_ADDR: u8 = 0x1d;
+pub struct BME680 {
+    native_device: bme680_dev,
+}
 
-/** Heater settings */
-pub const BME680_RES_HEAT0_ADDR: u8 = 0x5a;
-pub const BME680_GAS_WAIT0_ADDR: u8 = 0x64;
+impl BME680 {
+    pub fn initialize(device: &str, device_id: Bme680Address) -> Result<BME680, SensorError> {
+        let _ = DEVICES.with(|devices_cell| {
+            devices_cell
+                .borrow_mut()
+                .insert(
+                    device_id as u8,
+                    LinuxI2CDevice::new(device, device_id as u16).unwrap(),
+                )
+                .unwrap()
+        });
 
-/** Sensor configuration registers */
-pub const BME680_CONF_HEAT_CTRL_ADDR: u8 = 0x70;
-pub const BME680_CONF_ODR_RUN_GAS_NBC_ADDR: u8 = 0x71;
-pub const BME680_CONF_OS_H_ADDR: u8 = 0x72;
-pub const BME680_MEM_PAGE_ADDR: u8 = 0xf3;
-pub const BME680_CONF_T_P_MODE_ADDR: u8 = 0x74;
-pub const BME680_CONF_ODR_FILT_ADDR: u8 = 0x75;
+        let mut native_dev = bme680_dev {
+            chip_id: BME680_CHIP_ID,
+            dev_id: device_id as u8, // i2c address
+            intf: bme680_intf_BME680_I2C_INTF,
+            mem_page: 0,
+            amb_temp: 25, // according to specs
+            calib: bme680_calib_data::default(),
+            tph_sett: bme680_tph_sett::default(),
+            gas_sett: bme680_gas_sett::default(),
+            power_mode: BME680_SLEEP_MODE, // sleep mode, 0x01 forced mode,
+            new_fields: 0,
+            info_msg: 0,
+            read: Some(read),
+            write: Some(write),
+            delay_ms: Some(delay),
+            com_rslt: 0,
+        };
 
-/** Coefficient's address */
-pub const BME680_COEFF_ADDR1: u8 = 0x89;
-pub const BME680_COEFF_ADDR2: u8 = 0xe1;
+        let mut init_result = BME680_OK;
+        unsafe {
+            init_result = bme680_init(&mut native_dev);
+        }
+        if init_result != BME680_OK {
+            Err(SensorError::from(init_result))
+        } else {
+            Ok(BME680 {
+                native_device: native_dev,
+            })
+        }
+    }
 
-/** Chip identifier */
-pub const BME680_CHIP_ID_ADDR: u8 = 0xd0;
+    fn read_prep(&mut self, sleep: u32) -> Result<(), SensorError> {
+        let set_required_settings = BME680_OST_SEL
+            | BME680_OSP_SEL
+            | BME680_OSH_SEL
+            | BME680_FILTER_SEL
+            | BME680_GAS_SENSOR_SEL;
 
-/** Soft reset register */
-pub const BME680_SOFT_RESET_ADDR: u8 = 0xe0;
+        self.native_device.gas_sett.heatr_temp = 320;
+        self.native_device.gas_sett.heatr_dur = 150;
+        let mut rslt = BME680_OK;
+        unsafe {
+            rslt = bme680_set_sensor_settings(set_required_settings, &mut self.native_device);
+            bme680_get_profile_dur(&mut (sleep as u16), &self.native_device);
+        }
+        if BME680_OK == rslt {
+            Ok(())
+        } else {
+            Err(SensorError::from(rslt))
+        }
+    }
 
-/** Heater control settings */
-pub const BME680_ENABLE_HEATER: u8 = 0x00;
-pub const BME680_DISABLE_HEATER: u8 = 0x08;
-
-/** Gas measurement settings */
-pub const BME680_DISABLE_GAS_MEAS: u8 = 0x00;
-pub const BME680_ENABLE_GAS_MEAS: u8 = 0x01;
-
-/** Over-sampling settings */
-pub const BME680_OS_NONE: u8 = 0;
-pub const BME680_OS_1X: u8 = 1;
-pub const BME680_OS_2X: u8 = 2;
-pub const BME680_OS_4X: u8 = 3;
-pub const BME680_OS_8X: u8 = 4;
-pub const BME680_OS_16X: u8 = 5;
-
-/** IIR filter settings */
-pub const BME680_FILTER_SIZE_0: u8 = 0;
-pub const BME680_FILTER_SIZE_1: u8 = 1;
-pub const BME680_FILTER_SIZE_3: u8 = 2;
-pub const BME680_FILTER_SIZE_7: u8 = 3;
-pub const BME680_FILTER_SIZE_15: u8 = 4;
-pub const BME680_FILTER_SIZE_31: u8 = 5;
-pub const BME680_FILTER_SIZE_63: u8 = 6;
-pub const BME680_FILTER_SIZE_127: u8 = 7;
-
-/** Power mode settings */
-pub const BME680_SLEEP_MODE: u8 = 0;
-pub const BME680_FORCED_MODE: u8 = 1;
-
-/** Delay related macro declaration */
-pub const BME680_RESET_PERIOD: u32 = 10;
-
-/** SPI memory page settings */
-pub const BME680_MEM_PAGE0: u8 = 0x10;
-pub const BME680_MEM_PAGE1: u8 = 0x00;
-
-/** Ambient humidity shift value for compensation */
-pub const BME680_HUM_REG_SHIFT_VAL: u8 = 4;
-
-/** Run gas enable and disable settings */
-pub const BME680_RUN_GAS_DISABLE: u8 = 0;
-pub const BME680_RUN_GAS_ENABLE: u8 = 1;
-
-/** Buffer length macro declaration */
-pub const BME680_TMP_BUFFER_LENGTH: u8 = 40;
-pub const BME680_REG_BUFFER_LENGTH: u8 = 6;
-pub const BME680_FIELD_DATA_LENGTH: u8 = 3;
-pub const BME680_GAS_REG_BUF_LENGTH: u8 = 20;
-
-/** Settings selector */
-pub const BME680_OST_SEL: u16 = 1;
-pub const BME680_OSP_SEL: u16 = 2;
-pub const BME680_OSH_SEL: u16 = 4;
-pub const BME680_GAS_MEAS_SEL: u16 = 8;
-pub const BME680_FILTER_SEL: u16 = 16;
-pub const BME680_HCNTRL_SEL: u16 = 32;
-pub const BME680_RUN_GAS_SEL: u16 = 64;
-pub const BME680_NBCONV_SEL: u16 = 128;
-pub const BME680_GAS_SENSOR_SEL: u16 =
-    (BME680_GAS_MEAS_SEL | BME680_RUN_GAS_SEL | BME680_NBCONV_SEL);
-
-/** Number of conversion settings*/
-pub const BME680_NBCONV_MIN: u8 = 0;
-pub const BME680_NBCONV_MAX: u8 = 10;
-
-/** Mask definitions */
-pub const BME680_GAS_MEAS_MSK: u8 = 0x30;
-pub const BME680_NBCONV_MSK: u8 = 0x0F;
-pub const BME680_FILTER_MSK: u8 = 0x1C;
-pub const BME680_OST_MSK: u8 = 0xE0;
-pub const BME680_OSP_MSK: u8 = 0x1C;
-pub const BME680_OSH_MSK: u8 = 0x07;
-pub const BME680_HCTRL_MSK: u8 = 0x08;
-pub const BME680_RUN_GAS_MSK: u8 = 0x10;
-pub const BME680_MODE_MSK: u8 = 0x03;
-pub const BME680_RHRANGE_MSK: u8 = 0x30;
-pub const BME680_RSERROR_MSK: u8 = 0xf0;
-pub const BME680_NEW_DATA_MSK: u8 = 0x80;
-pub const BME680_GAS_INDEX_MSK: u8 = 0x0f;
-pub const BME680_GAS_RANGE_MSK: u8 = 0x0f;
-pub const BME680_GASM_VALID_MSK: u8 = 0x20;
-pub const BME680_HEAT_STAB_MSK: u8 = 0x10;
-pub const BME680_MEM_PAGE_MSK: u8 = 0x10;
-pub const BME680_SPI_RD_MSK: u8 = 0x80;
-pub const BME680_SPI_WR_MSK: u8 = 0x7f;
-pub const BME680_BIT_H1_DATA_MSK: u8 = 0x0F;
-
-/** Bit position definitions for sensor settings */
-pub const BME680_GAS_MEAS_POS: u8 = 4;
-pub const BME680_FILTER_POS: u8 = 2;
-pub const BME680_OST_POS: u8 = 5;
-pub const BME680_OSP_POS: u8 = 2;
-pub const BME680_RUN_GAS_POS: u8 = 4;
+    pub fn read_all(&mut self) -> Result<Bme680Data, SensorError> {
+        let mut data = bme680_field_data::default();
+        let meas_period = 20;
+        let _ = self.read_prep(meas_period)?;
+        let mut rslt = BME680_OK;
+        unsafe {
+            delay(meas_period);
+            rslt = bme680_get_sensor_data(&mut data, &mut self.native_device);
+        }
+        if rslt == BME680_OK {
+            Ok(Bme680Data {
+                pressure: data.pressure,
+                temperature: data.temperature as f32 / 100.0,
+                humidity: data.humidity as f32 / 1000.0,
+                gas_resistance: data.gas_resistance,
+            })
+        } else {
+            Err(SensorError::from(rslt))
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
