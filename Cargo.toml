@@ -1,6 +1,6 @@
 [package]
 name = "bme680"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Claus Matzinger <claus.matzinger+kb@gmail.com>"]
 edition = "2018"
 
@@ -10,5 +10,5 @@ edition = "2018"
 i2cdev = "0.4"
 
 [build-dependencies]
-bindgen = "0.50"
+bindgen = "0.51"
 cc = "1"
