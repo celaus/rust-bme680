@@ -1,8 +1,10 @@
-mod errors;
+pub mod devices;
+pub mod errors;
 mod helpers;
 mod sensors;
 mod source;
 
+use devices::{AirQualitySensor, Barometer, Thermometer};
 use errors::SensorError;
 use source::*;
 
@@ -27,18 +29,46 @@ pub enum Oversampling {
     _16X = 5,
 }
 
+impl From<u8> for Oversampling {
+    fn from(os: u8) -> Self {
+        match os {
+            1 => Oversampling::_1X,
+            2 => Oversampling::_2X,
+            4 => Oversampling::_4X,
+            8 => Oversampling::_8X,
+            16 => Oversampling::_16X,
+            _ => Oversampling::None,
+        }
+    }
+}
+
 ///
 ///  IIR filter settings
 ///
 pub enum FilterSize {
-    Size_0 = 0,
-    Size_1 = 1,
-    Size_3 = 2,
-    Size_7 = 3,
-    Size_15 = 4,
-    Size_31 = 5,
-    Size_63 = 6,
-    Size_127 = 7,
+    Size0 = 0,
+    Size1 = 1,
+    Size3 = 2,
+    Size7 = 3,
+    Size15 = 4,
+    Size31 = 5,
+    Size63 = 6,
+    Size127 = 7,
+}
+
+impl From<u8> for FilterSize {
+    fn from(filter: u8) -> Self {
+        match filter {
+            0 => FilterSize::Size0,
+            1 => FilterSize::Size1,
+            2 => FilterSize::Size3,
+            3 => FilterSize::Size7,
+            4 => FilterSize::Size15,
+            5 => FilterSize::Size31,
+            6 => FilterSize::Size63,
+            _ => FilterSize::Size127,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -89,18 +119,35 @@ unsafe extern "C" fn delay(ms: u32) {
     sleep(Duration::from_millis(ms as u64));
 }
 
+#[derive(Debug)]
 pub struct Bme680Data {
     pub temperature: f32,
     pub pressure: u32,
     pub humidity: f32,
-    pub gas_resistance: u32,
+    pub gas_resistance: Option<u32>,
 }
 
 pub struct BME680 {
     native_device: bme680_dev,
+    reset: bool,
+    measure_period: u16,
+    settings: u16,
 }
 
 impl BME680 {
+    pub(crate) fn raw_init(dev: bme680_dev) -> BME680 {
+        BME680 {
+            native_device: dev,
+            measure_period: 20, // some value, will be changed on first read
+            reset: true,
+            settings: BME680_OST_SEL
+                | BME680_OSP_SEL
+                | BME680_OSH_SEL
+                | BME680_FILTER_SEL
+                | BME680_GAS_SENSOR_SEL,
+        }
+    }
+
     pub fn initialize(device: &str, device_id: Bme680Address) -> Result<BME680, SensorError> {
         let _ = DEVICES.with(|devices_cell| {
             devices_cell
@@ -130,32 +177,22 @@ impl BME680 {
             com_rslt: 0,
         };
 
-        let mut init_result = BME680_OK;
+        let init_result;
         unsafe {
             init_result = bme680_init(&mut native_dev);
         }
         if init_result != BME680_OK {
             Err(SensorError::from(init_result))
         } else {
-            Ok(BME680 {
-                native_device: native_dev,
-            })
+            Ok(BME680::raw_init(native_dev))
         }
     }
 
-    fn read_prep(&mut self, sleep: u32) -> Result<(), SensorError> {
-        let set_required_settings = BME680_OST_SEL
-            | BME680_OSP_SEL
-            | BME680_OSH_SEL
-            | BME680_FILTER_SEL
-            | BME680_GAS_SENSOR_SEL;
-
-        self.native_device.gas_sett.heatr_temp = 320;
-        self.native_device.gas_sett.heatr_dur = 150;
-        let mut rslt = BME680_OK;
+    fn activate_device(&mut self) -> Result<(), SensorError> {
+        let rslt;
+        self.native_device.power_mode = BME680_FORCED_MODE;
         unsafe {
-            rslt = bme680_set_sensor_settings(set_required_settings, &mut self.native_device);
-            bme680_get_profile_dur(&mut (sleep as u16), &self.native_device);
+            rslt = bme680_set_sensor_mode(&mut self.native_device);
         }
         if BME680_OK == rslt {
             Ok(())
@@ -164,13 +201,41 @@ impl BME680 {
         }
     }
 
+    fn read_prep(&mut self) -> Result<(), SensorError> {
+        let mut sleep_period = 20_u16;
+
+        self.native_device.gas_sett.heatr_temp = 320;
+        self.native_device.gas_sett.heatr_dur = 150;
+        let rslt;
+        unsafe {
+            rslt = bme680_set_sensor_settings(self.settings, &mut self.native_device);
+        }
+
+        self.activate_device()?;
+
+        unsafe {
+            bme680_get_profile_dur(&mut sleep_period, &self.native_device);
+        }
+
+        self.measure_period = sleep_period;
+        if BME680_OK == rslt {
+            self.reset = false;
+            Ok(())
+        } else {
+            Err(SensorError::from(rslt))
+        }
+    }
+
     pub fn read_all(&mut self) -> Result<Bme680Data, SensorError> {
         let mut data = bme680_field_data::default();
-        let meas_period = 20;
-        let _ = self.read_prep(meas_period)?;
-        let mut rslt = BME680_OK;
+        if self.reset {
+            self.read_prep()?;
+        } else {
+            self.activate_device()?;
+        }
+        let rslt;
         unsafe {
-            delay(meas_period);
+            delay(self.measure_period as u32);
             rslt = bme680_get_sensor_data(&mut data, &mut self.native_device);
         }
         if rslt == BME680_OK {
@@ -178,18 +243,116 @@ impl BME680 {
                 pressure: data.pressure,
                 temperature: data.temperature as f32 / 100.0,
                 humidity: data.humidity as f32 / 1000.0,
-                gas_resistance: data.gas_resistance,
+                gas_resistance: if (data.status & BME680_GASM_VALID_MSK) == 0 {
+                    Some(data.gas_resistance)
+                } else {
+                    None
+                },
             })
         } else {
             Err(SensorError::from(rslt))
         }
     }
+
+    pub fn get_pressure_oversampling(&self) -> Oversampling {
+        Oversampling::from(self.native_device.tph_sett.os_pres)
+    }
+
+    pub fn get_humidity_oversampling(&self) -> Oversampling {
+        Oversampling::from(self.native_device.tph_sett.os_hum)
+    }
+
+    pub fn get_temperature_oversampling(&self) -> Oversampling {
+        Oversampling::from(self.native_device.tph_sett.os_temp)
+    }
+
+    pub fn set_pressure_oversampling(&mut self, oversampling: Oversampling) {
+        self.native_device.tph_sett.os_pres = oversampling as u8;
+        self.reset = true;
+    }
+
+    pub fn set_humidity_oversampling(&mut self, oversampling: Oversampling) {
+        self.native_device.tph_sett.os_hum = oversampling as u8;
+        self.reset = true;
+    }
+
+    pub fn set_temperature_oversampling(&mut self, oversampling: Oversampling) {
+        self.native_device.tph_sett.os_temp = oversampling as u8;
+        self.reset = true;
+    }
+
+    pub fn get_filter_size(&self) -> FilterSize {
+        FilterSize::from(self.native_device.tph_sett.filter)
+    }
+
+    pub fn set_filter_size(&mut self, filter: FilterSize) {
+        self.native_device.tph_sett.filter = filter as u8;
+        self.reset = true;
+    }
+}
+
+impl Thermometer for BME680 {
+    fn temperature_celsius(&mut self) -> Result<f32, SensorError> {
+        self.read_all().map(|data| data.temperature)
+    }
+}
+
+impl Barometer for BME680 {
+    fn pressure_hpa(&mut self) -> Result<u32, SensorError> {
+        self.read_all().map(|data| data.pressure)
+    }
+
+    fn humidity(&mut self) -> Result<f32, SensorError> {
+        self.read_all().map(|data| data.humidity)
+    }
+}
+
+impl AirQualitySensor for BME680 {
+    fn gas_resistance(&mut self) -> Result<Option<u32>, SensorError> {
+        self.read_all().map(|data| data.gas_resistance)
+    }
+
+    fn aqi(&mut self) -> Result<f32, SensorError> {
+        self.read_all().map(|data| data.temperature)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    use super::*;
+
+    thread_local!(static DATA: RefCell<BTreeMap<u8, LinuxI2CDevice>> = RefCell::new(BTreeMap::new()));
+
+    unsafe extern "C" fn test_write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
+        DATA.with(|data| data.borrow().get(&dev_id).map_or(1, |data| 0))
     }
+
+    unsafe extern "C" fn test_read(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
+        DATA.with(|data| data.borrow().get(&dev_id).map_or(1, |data| 0))
+    }
+
+    unsafe extern "C" fn test_delay(ms: u32) {}
+
+    fn fake_device(rw_result: u8) -> BME680 {
+        BME680::raw_init(bme680_dev {
+            chip_id: BME680_CHIP_ID,
+            dev_id: rw_result, // i2c address
+            intf: bme680_intf_BME680_I2C_INTF,
+            mem_page: 0,
+            amb_temp: 25, // according to specs
+            calib: bme680_calib_data::default(),
+            tph_sett: bme680_tph_sett::default(),
+            gas_sett: bme680_gas_sett::default(),
+            power_mode: BME680_SLEEP_MODE, // sleep mode, 0x01 forced mode,
+            new_fields: 0,
+            info_msg: 0,
+            read: Some(test_read),
+            write: Some(test_write),
+            delay_ms: Some(test_delay),
+            com_rslt: 0,
+        })
+    }
+
+    #[test]
+    fn read_temperature() {}
 }

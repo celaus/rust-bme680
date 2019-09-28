@@ -12,8 +12,9 @@ fn main() {
     println!("cargo:rustc-link-lib=bme680");
     let bindings = bindgen::Builder::default()
         .header(HEADER_FILE_NAME)
+        .clang_arg("-I/usr/arm-linux-gnueabihf/include/")
         .generate()
-        .expect("Error generating bindings");
+        .expect("Error generating bindings. Something failed in build.rs");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
