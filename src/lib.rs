@@ -155,8 +155,7 @@ impl BME680 {
                 .insert(
                     device_id as u8,
                     LinuxI2CDevice::new(device, device_id as u16).unwrap(),
-                )
-                .unwrap()
+                )    
         });
 
         let mut native_dev = bme680_dev {
