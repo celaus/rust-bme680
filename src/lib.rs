@@ -288,6 +288,19 @@ impl BME680 {
         self.native_device.tph_sett.filter = filter as u8;
         self.reset = true;
     }
+    
+    pub fn set_enable_gas_resistence(&mut self, enable: bool) {
+        if enable {
+            self.native_device.gas_sett.run_gas = BME680_ENABLE_GAS_MEAS;
+        }
+        else {
+
+        }
+    }
+
+    pub fn get_gas_resistence(&self) -> bool {
+        self.native_device.gas_sett.run_gas == BME680_ENABLE_GAS_MEAS
+    }
 }
 
 impl Thermometer for BME680 {
