@@ -13,6 +13,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header(HEADER_FILE_NAME)
         .clang_arg("-I/usr/arm-linux-gnueabihf/include/")
+        .clang_arg("-I/extra/")
         .generate()
         .expect("Error generating bindings. Something failed in build.rs");
 
