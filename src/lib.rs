@@ -10,6 +10,7 @@ use source::*;
 
 use i2cdev::core::*;
 use i2cdev::linux::LinuxI2CDevice;
+use log::{debug, error, info, trace, warn};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::BTreeMap;
@@ -92,7 +93,7 @@ unsafe extern "C" fn write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) ->
             dev.smbus_write_i2c_block_data(reg_addr, &d)
                 .map(|_| 0)
                 .map_err(|e| {
-                    println!("error: {:?}", e);
+                    error!("error: {:?}", e);
                     e
                 })
                 .unwrap_or(1)
@@ -149,13 +150,11 @@ impl BME680 {
     }
 
     pub fn initialize(device: &str, device_id: Bme680Address) -> Result<BME680, SensorError> {
-        let _ = DEVICES.with(|devices_cell| {
-            devices_cell
-                .borrow_mut()
-                .insert(
-                    device_id as u8,
-                    LinuxI2CDevice::new(device, device_id as u16).unwrap(),
-                )    
+        DEVICES.with(|devices_cell| {
+            devices_cell.borrow_mut().insert(
+                device_id as u8,
+                LinuxI2CDevice::new(device, device_id as u16).unwrap(),
+            );
         });
 
         let mut native_dev = bme680_dev {
@@ -181,8 +180,10 @@ impl BME680 {
             init_result = bme680_init(&mut native_dev);
         }
         if init_result != BME680_OK {
+            info!("failed to initialize '{}'", device);
             Err(SensorError::from(init_result))
         } else {
+            info!("successfully initialize '{}'", device);
             Ok(BME680::raw_init(native_dev))
         }
     }
@@ -193,10 +194,13 @@ impl BME680 {
         unsafe {
             rslt = bme680_set_sensor_mode(&mut self.native_device);
         }
-        if BME680_OK == rslt {
+        if rslt == BME680_OK {
+            trace!("sensor set to FORCED");
             Ok(())
         } else {
-            Err(SensorError::from(rslt))
+            let e = SensorError::from(rslt);
+            trace!("error setting sensor to forced: '{}'", e);
+            Err(e)
         }
     }
 
@@ -217,11 +221,14 @@ impl BME680 {
         }
 
         self.measure_period = sleep_period;
-        if BME680_OK == rslt {
+        if rslt == BME680_OK {
+            trace!("sensor prepared");
             self.reset = false;
             Ok(())
         } else {
-            Err(SensorError::from(rslt))
+            let e = SensorError::from(rslt);
+            trace!("sensor preparation error: '{}'", e);
+            Err(e)
         }
     }
 
@@ -249,7 +256,9 @@ impl BME680 {
                 },
             })
         } else {
-            Err(SensorError::from(rslt))
+            let e = SensorError::from(rslt);
+            trace!("error reading data: '{}'", e);
+            Err(e)
         }
     }
 
@@ -288,13 +297,10 @@ impl BME680 {
         self.native_device.tph_sett.filter = filter as u8;
         self.reset = true;
     }
-    
     pub fn set_enable_gas_resistence(&mut self, enable: bool) {
         if enable {
             self.native_device.gas_sett.run_gas = BME680_ENABLE_GAS_MEAS;
-        }
-        else {
-
+        } else {
         }
     }
 
