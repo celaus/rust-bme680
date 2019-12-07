@@ -93,8 +93,8 @@ unsafe extern "C" fn write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) ->
             trace!("Device found");
             let d = std::slice::from_raw_parts(data, len as usize);
             dev.smbus_write_i2c_block_data(reg_addr, &d)
-                .map(|r| {
-                    trace!("All good: {}", r);
+                .map(|_| {
+                    trace!("Writing worked");
                     0
                 })
                 .map_err(|e| {
