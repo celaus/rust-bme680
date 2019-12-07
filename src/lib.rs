@@ -87,18 +87,25 @@ impl Default for Bme680Address {
 thread_local!(static DEVICES: RefCell<BTreeMap<u8, LinuxI2CDevice>> = RefCell::new(BTreeMap::new()));
 
 unsafe extern "C" fn write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
+    let result = 
     DEVICES.with(|devices| {
         devices.borrow_mut().get_mut(&dev_id).map_or(1, |mut dev| {
+            trace!("Device found");
             let d = std::slice::from_raw_parts(data, len as usize);
             dev.smbus_write_i2c_block_data(reg_addr, &d)
-                .map(|_| 0)
+                .map(|r| {
+                    trace!("All good: {}", r);
+                    0
+                })
                 .map_err(|e| {
                     error!("error: {:?}", e);
                     e
                 })
                 .unwrap_or(1)
         })
-    })
+    });
+    trace!("Writing to bus, result {}", result);
+    result
 }
 
 unsafe extern "C" fn read(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
