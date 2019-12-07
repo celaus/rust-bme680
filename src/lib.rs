@@ -183,16 +183,24 @@ impl BME680 {
             info!("failed to initialize '{}'", device);
             Err(SensorError::from(init_result))
         } else {
-            info!("successfully initialize '{}'", device);
+            info!("successfully initialized '{}'", device);
             Ok(BME680::raw_init(native_dev))
         }
     }
 
     fn activate_device(&mut self) -> Result<(), SensorError> {
-        let rslt;
+        let mut rslt;
         self.native_device.power_mode = BME680_FORCED_MODE;
-        unsafe {
-            rslt = bme680_set_sensor_mode(&mut self.native_device);
+        let mut retries = 10;
+        loop {
+            unsafe {
+                rslt = bme680_set_sensor_mode(&mut self.native_device);
+            }
+            if retries == 0 || rslt == BME680_OK {
+                break;
+            }
+            retries -= 1;
+            debug!("Retrying setting the sensor to forced: {} left", retries);
         }
         if rslt == BME680_OK {
             trace!("sensor set to FORCED");
