@@ -191,7 +191,7 @@ impl BME680 {
     fn activate_device(&mut self) -> Result<(), SensorError> {
         let mut rslt;
         self.native_device.power_mode = BME680_FORCED_MODE;
-        let mut retries = 10;
+        let mut retries = 1000;
         loop {
             unsafe {
                 rslt = bme680_set_sensor_mode(&mut self.native_device);
