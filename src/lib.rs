@@ -87,7 +87,7 @@ impl Default for Bme680Address {
 thread_local!(static DEVICES: RefCell<BTreeMap<u8, LinuxI2CDevice>> = RefCell::new(BTreeMap::new()));
 
 unsafe extern "C" fn write(dev_id: u8, reg_addr: u8, data: *mut u8, len: u16) -> i8 {
-    info!("Writing to i2c");
+    info!("Writing to i2c {:?}", DEVICES);
     let result = 
     DEVICES.with(|devices| {
         devices.borrow_mut().get_mut(&dev_id).map_or(1, |mut dev| {
