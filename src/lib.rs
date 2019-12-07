@@ -190,18 +190,23 @@ impl BME680 {
 
     fn activate_device(&mut self) -> Result<(), SensorError> {
         let mut rslt;
-        self.native_device.power_mode = BME680_FORCED_MODE;
-        let mut retries = 1000;
+        let mut retries = 0;
         loop {
+            self.native_device.power_mode = BME680_FORCED_MODE;
+
             unsafe {
                 rslt = bme680_set_sensor_mode(&mut self.native_device);
+                bme680_get_sensor_mode(&mut self.native_device);
             }
-            if retries == 0 || rslt == BME680_OK {
+            if self.native_device.power_mode == BME680_FORCED_MODE {
                 break;
             }
-            retries -= 1;
-            debug!("Retrying setting the sensor to forced: {} left", retries);
+            retries += 1;
+            unsafe {
+                delay(10);
+            }
         }
+        debug!("Retrying setting the sensor to forced: took {} tries", retries);
         if rslt == BME680_OK {
             trace!("sensor set to FORCED");
             Ok(())
